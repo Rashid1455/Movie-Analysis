@@ -1,0 +1,261 @@
+# Movie-Analysis
+import pandas as pd
+import numpy as np
+import sqlite3
+import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --------------------------
+# 1. Manual Data Creation
+# --------------------------
+
+def create_manual_data():
+    """Create IMDB-style data directly in code"""
+    data = {
+        'Title': [
+            'The Shawshank Redemption', 'The Godfather', 'The Dark Knight', 
+            'Pulp Fiction', 'Fight Club', 'Forrest Gump', 
+            'Inception', 'The Matrix', 'Goodfellas'
+        ],
+        'Year': [1994, 1972, 2008, 1994, 1999, 1994, 2010, 1999, 1990],
+        'Genre': [
+            'Drama', 'Crime,Drama', 'Action,Crime,Drama', 
+            'Crime,Drama', 'Drama', 'Drama,Romance', 
+            'Action,Adventure,Sci-Fi', 'Action,Sci-Fi', 'Biography,Crime,Drama'
+        ],
+        'Director': [
+            'Frank Darabont', 'Francis Ford Coppola', 'Christopher Nolan',
+            'Quentin Tarantino', 'David Fincher', 'Robert Zemeckis',
+            'Christopher Nolan', 'Lana Wachowski', 'Martin Scorsese'
+        ],
+        'Rating': [9.3, 9.2, 9.0, 8.9, 8.8, 8.8, 8.8, 8.7, 8.7],
+        'Runtime (Minutes)': [142, 175, 152, 154, 139, 142, 148, 136, 146],
+        'Votes': [2700000, 1900000, 2600000, 2100000, 2200000, 2100000, 2400000, 1900000, 1200000],
+        'Revenue (Millions)': [28.34, 134.97, 534.86, 213.93, 37.03, 330.25, 292.58, 171.48, 46.84],
+        'Metascore': [80, 100, 84, 94, 66, 82, 74, 73, 89]
+    }
+    return pd.DataFrame(data)
+
+df = create_manual_data()
+
+# --------------------------
+# 2. Data Cleaning
+# --------------------------
+
+def clean_imdb_data(df):
+    """Clean and prepare the IMDB dataset"""
+    # Standardize column names
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_').str.replace('(', '').str.replace(')', '')
+    
+    # Handle missing values (though our manual data has none)
+    df['revenue_millions'] = df['revenue_millions'].fillna(df['revenue_millions'].median())
+    df['metascore'] = df['metascore'].fillna(df['metascore'].median())
+    df['director'] = df['director'].fillna('Unknown')
+    
+    # Clean year column
+    df['year'] = df['year'].astype(int)
+    
+    # Create decade column
+    df['decade'] = (df['year'] // 10) * 10
+    
+    # Clean genre column (take first genre if multiple)
+    df['genre'] = df['genre'].str.split(',').str[0].str.strip()
+    
+    # Calculate additional metrics
+    df['revenue'] = df['revenue_millions'] * 1000000
+    df['rating_category'] = pd.cut(df['rating'], 
+                                 bins=[0, 4, 6, 8, 10],
+                                 labels=['Poor', 'Average', 'Good', 'Excellent'])
+    
+    return df
+
+df_clean = clean_imdb_data(df)
+
+# --------------------------
+# 3. SQL Database Setup
+# --------------------------
+
+def create_sql_database(df, db_name='imdb.db'):
+    """Create SQLite database from cleaned DataFrame"""
+    conn = sqlite3.connect(db_name)
+    
+    # First, drop existing tables if they exist
+    conn.execute("DROP TABLE IF EXISTS movies")
+    conn.execute("DROP TABLE IF EXISTS genres")
+    
+    # Create movies table with proper ID column
+    conn.execute("""
+    CREATE TABLE movies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        year INTEGER,
+        genre TEXT,
+        director TEXT,
+        rating REAL,
+        runtime_minutes INTEGER,
+        votes INTEGER,
+        revenue_millions REAL,
+        revenue INTEGER,
+        metascore INTEGER,
+        decade INTEGER,
+        rating_category TEXT
+    );
+    """)
+    
+    # Create genre table
+    conn.execute("""
+    CREATE TABLE genres (
+        movie_id INTEGER,
+        genre TEXT,
+        FOREIGN KEY (movie_id) REFERENCES movies (id)
+    );
+    """)
+    
+    # Insert data into movies table with explicit ID
+    for index, row in df.iterrows():
+        conn.execute("""
+        INSERT INTO movies (
+            title, year, genre, director, rating, 
+            runtime_minutes, votes, revenue_millions, 
+            revenue, metascore, decade, rating_category
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            row['title'], row['year'], row['genre'], row['director'], row['rating'],
+            row['runtime_minutes'], row['votes'], row['revenue_millions'],
+            row['revenue'], row['metascore'], row['decade'], row['rating_category']
+        ))
+    
+    # Insert into genres table
+    for index, row in df.iterrows():
+        genres = row['genre'].split(',') if isinstance(row['genre'], str) else []
+        for genre in genres:
+            conn.execute("""
+            INSERT INTO genres (movie_id, genre)
+            VALUES (?, ?)
+            """, (index + 1, genre.strip()))  # Using index + 1 as movie_id
+    
+    # Create indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_genre ON genres(genre)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_year ON movies(year)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rating ON movies(rating)")
+    
+    conn.commit()
+    conn.close()
+    print(f"Database {db_name} created with {len(df)} movies")
+
+# --------------------------
+# 4. Streamlit Dashboard
+# --------------------------
+
+def movie_dashboard():
+    st.set_page_config(layout="wide", page_title="IMDB Movie Analysis")
+    
+    # Title and description
+    st.title("🎬 IMDB-Style Movie Analysis Data BY Rashid Ali ")
+    st.markdown("""
+    Interactive dashboard showcasing 9 classic movies with:
+    - Filtering capabilities
+    - Visualizations
+    - SQL-backed analytics
+    """)
+    
+    # Connect to database
+    conn = sqlite3.connect('imdb.db')
+    
+    # Sidebar filters
+    st.sidebar.header("Filters")
+    
+    # Year range filter
+    min_year, max_year = conn.execute("SELECT MIN(year), MAX(year) FROM movies").fetchone()
+    year_range = st.sidebar.slider(
+        "Release Year Range",
+        min_year, max_year,
+        (min_year, max_year))
+    
+    # Genre filter
+    genres = [g[0] for g in conn.execute("SELECT DISTINCT genre FROM genres").fetchall()]
+    selected_genres = st.sidebar.multiselect(
+        "Select Genres",
+        genres,
+        default=genres
+    )
+    
+    # Rating filter
+    rating_range = st.sidebar.slider(
+        "IMDB Rating Range",
+        0.0, 10.0,
+        (8.0, 9.5)
+    )
+    
+    # Build SQL query
+    query = """
+        SELECT m.* 
+        FROM movies m
+        JOIN genres g ON m.id = g.movie_id
+        WHERE m.year BETWEEN ? AND ?
+        AND g.genre IN ({})
+        AND m.rating BETWEEN ? AND ?
+        GROUP BY m.id
+    """.format(','.join(['?']*len(selected_genres)))
+    
+    params = [
+        year_range[0], year_range[1],
+        *selected_genres,
+        rating_range[0], rating_range[1]
+    ]
+    
+    filtered_df = pd.read_sql(query, conn, params=params)
+    
+    # Display metrics
+    st.header("Movie Metrics")
+    cols = st.columns(4)
+    cols[0].metric("Total Movies", len(filtered_df))
+    cols[1].metric("Avg Rating", f"{filtered_df['rating'].mean():.1f}")
+    cols[2].metric("Oldest Film", filtered_df['year'].min())
+    cols[3].metric("Highest Rated", filtered_df['title'].iloc[0])
+    
+    # Main content
+    tab1, tab2 = st.tabs(["Data View", "Visualizations"])
+    
+    with tab1:
+        st.subheader("Filtered Movies")
+        # FIXED: Changed column selection to use square brackets and proper column names
+        st.dataframe(filtered_df[[
+            'title', 'year', 'genre', 'director', 
+            'rating', 'runtime_minutes', 'revenue_millions'
+        ]])
+        
+    with tab2:
+        st.subheader("Analysis")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Ratings Distribution**")
+            fig, ax = plt.subplots()
+            sns.histplot(filtered_df['rating'], bins=5, kde=True, ax=ax)
+            st.pyplot(fig)
+            
+        with col2:
+            st.markdown("**Revenue vs Rating**")
+            fig, ax = plt.subplots(figsize=(8,4))
+            sns.scatterplot(
+                data=filtered_df,
+                x='rating',
+                y='revenue_millions',
+                hue='director',
+                size='votes',
+                sizes=(100, 500),
+                ax=ax
+            )
+            plt.legend(bbox_to_anchor=(1.05, 1))
+            st.pyplot(fig)
+    
+    conn.close()
+
+if __name__ == '__main__':
+    # Create the database first
+    create_sql_database(df_clean)
+    # Then run the dashboard
+    movie_dashboard()
